@@ -199,7 +199,7 @@
   }
 
   /* ================= UI state ================= */
-  var ui = { view: 'dashboard', f: {} };
+  var ui = { view: 'dashboard', f: {}, sel: {} };
   var FILTER_DEFAULTS = {
     dashboard: function () { return { month: monthNow() }; },
     employees: function () { return { q: '', status: '', dept: '' }; },
@@ -285,16 +285,49 @@
   }
 
   /* ================= Table + empty-state builders ================= */
+  function unesc(s) {
+    return String(s).replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, '&');
+  }
   function tbl(headers, rows, foot) {
-    var th = headers.map(function (h) { return '<th scope="col">' + esc(h) + '</th>'; }).join('');
-    var body = rows.map(function (r) {
-      return '<tr>' + r.map(function (c, i) { return '<td data-label="' + esc(headers[i]) + '">' + c + '</td>'; }).join('') + '</tr>';
+    var selKind = '', selIds = [];
+    if (headers[headers.length - 1] === 'Actions' && rows.length) {
+      var allEdit = rows.every(function (r) {
+        var m = /data-action="edit" data-kind="([^"]+)" data-id="([^"]*)"/.exec(String(r[r.length - 1]));
+        if (!m) return false;
+        selKind = m[1]; selIds.push(unesc(m[2]));
+        return true;
+      });
+      if (!allEdit) { selKind = ''; selIds = []; }
+    }
+    var sel = {};
+    if (selKind) {
+      var prev = ui.sel[selKind] || {};
+      selIds.forEach(function (id) { if (prev[id]) sel[id] = true; });
+      ui.sel[selKind] = sel;
+    }
+    var allOn = !!selKind && selIds.length > 0 && selIds.every(function (id) { return sel[id]; });
+    var th = (selKind ? '<th scope="col" class="selcol"><input type="checkbox" data-sel-all="' + selKind + '" aria-label="Select all rows"' + (allOn ? ' checked' : '') + '></th>' : '') +
+      headers.map(function (h) { return '<th scope="col">' + esc(h) + '</th>'; }).join('');
+    var body = rows.map(function (r, ri) {
+      var cells = r.map(function (c, i) { return '<td data-label="' + esc(headers[i]) + '">' + c + '</td>'; }).join('');
+      var on = !!selKind && !!sel[selIds[ri]];
+      if (selKind) cells = '<td class="selcol" data-label="Select"><input type="checkbox" data-sel="' + selKind + '" data-id="' + esc(selIds[ri]) + '" aria-label="Select row"' + (on ? ' checked' : '') + '></td>' + cells;
+      return '<tr' + (on ? ' class="selected"' : '') + '>' + cells + '</tr>';
     }).join('');
-    var ft = foot ? '<tfoot><tr>' + foot.map(function (c, i) { return '<td data-label="' + esc(headers[i]) + '">' + c + '</td>'; }).join('') + '</tr></tfoot>' : '';
+    var ft = foot ? '<tfoot><tr>' + (selKind ? '<td class="selcol"></td>' : '') + foot.map(function (c, i) { return '<td data-label="' + esc(headers[i]) + '">' + c + '</td>'; }).join('') + '</tr></tfoot>' : '';
     return '<div class="table-wrap"><table class="rt"><thead><tr>' + th + '</tr></thead><tbody>' + body + '</tbody>' + ft + '</table></div>';
   }
   function cardOf(title, chip, inner) {
-    return '<div class="card"><div class="card-head"><h3>' + esc(title) + '</h3>' + (chip ? '<span class="chip">' + esc(chip) + '</span>' : '') + '</div>' + inner + '</div>';
+    var m = /data-sel-all="([^"]+)"/.exec(inner), kind = m ? m[1] : '', pick = '', bar = '';
+    if (kind) {
+      var n = Object.keys(ui.sel[kind] || {}).length, cfg = FORMS[kind], at = ' data-kind="' + kind + '"';
+      pick = '<button type="button" class="btn btn-sm btn-ghost" data-action="bulk-all"' + at + '>Select all</button>';
+      bar = '<div class="bulkbar' + (n ? '' : ' hidden') + '" data-bulkbar="' + kind + '"><strong class="bulk-count">' + n + ' selected</strong>' +
+        (cfg && cfg.bulkNames ? '<button type="button" class="btn btn-sm btn-accent" data-action="bulk-edit"' + at + '>Edit selected</button>' : '') +
+        '<button type="button" class="btn btn-sm btn-danger-o" data-action="bulk-delete"' + at + '>Delete selected</button>' +
+        '<button type="button" class="btn btn-sm btn-ghost" data-action="bulk-clear"' + at + '>Clear</button></div>';
+    }
+    return '<div class="card"><div class="card-head"><h3>' + esc(title) + '</h3><div class="head-right">' + (chip ? '<span class="chip">' + esc(chip) + '</span>' : '') + pick + '</div></div>' + bar + inner + '</div>';
   }
   function emptyState(title, text, btnLabel, kind) {
     return '<div class="empty"><div class="ico-big">' + svg('flame') + '</div><h3>' + esc(title) + '</h3><p>' + esc(text) + '</p>' +
@@ -684,7 +717,10 @@
     dashboard: renderDashboard, employees: renderEmployees, leaves: renderLeaves, ot: renderOT, advances: renderAdvances,
     holidays: renderHolidays, outsiders: renderOutsiders, outsiderWork: renderOutsiderWork, outsiderOT: renderOutsiderOT, reports: renderReports, backup: renderBackup
   };
-  function renderView(v) { if (RENDER[v]) RENDER[v](); }
+  function renderView(v) {
+    if (RENDER[v]) RENDER[v]();
+    Object.keys(ui.sel).forEach(refreshBulk);
+  }
   function renderCurrent() { renderView(ui.view); }
 
   /* ================= Filters ================= */
@@ -755,12 +791,13 @@
         if (v.phone && !/^[0-9+()\-\s]{6,25}$/.test(v.phone)) return { msg: 'Enter a valid phone number.', field: 'phone' };
         return null;
       },
+      bulkNames: ['designation', 'department', 'status', 'notes'],
       describe: function (r) { return r.name + ' (' + r.empId + ')'; }
     },
     leaves: {
       title: 'Leave', coll: 'leaves', needs: NEED_EMP, holidayNote: 'leave',
       fields: function (rec) {
-        var f = [{ name: 'employeeId', label: 'Employee', type: 'select', required: true, placeholder: 'Select employee', options: empOptions(rec && rec.employeeId), wide: true }];
+        var f = [personField('employeeId', 'Employee', 'employee', empOptions(rec && rec.employeeId), rec)];
         if (!rec) f.push({ name: 'mode', label: 'Leave Dates', type: 'select', required: true, wide: true, options: [['single', 'Single date'], ['range', 'Multiple dates (continuous leave)']] });
         f.push({ name: 'date', label: 'Date', type: 'date', required: true });
         if (!rec) f.push({ name: 'dateTo', label: 'To Date', type: 'date', hidden: true });
@@ -786,26 +823,32 @@
         return null;
       },
       normalize: function (v) { var o = Object.assign({}, v); delete o.mode; delete o.dateTo; return o; },
-      customSave: function (v) {
-        if (v.mode !== 'range') return null;
+      customSave: function (v, people) {
+        var range = v.mode === 'range';
+        if (!range && !people) return null;
+        var ids = people || [v.employeeId], dates = range ? datesBetween(v.date, v.dateTo) : [v.date];
         var have = {}, added = 0, skipped = 0, holi = 0, now = new Date().toISOString();
-        db.leaves.forEach(function (l) { if (l.employeeId === v.employeeId) have[l.date] = 1; });
-        datesBetween(v.date, v.dateTo).forEach(function (d) {
-          if (isHoliday(d)) { holi++; return; }
-          if (have[d]) { skipped++; return; }
-          db.leaves.push({ id: uid(), createdAt: now, employeeId: v.employeeId, date: d, type: v.type, reason: v.reason, notes: v.notes });
-          added++;
+        db.leaves.forEach(function (l) { have[l.employeeId + '|' + l.date] = 1; });
+        ids.forEach(function (pid, pi) {
+          dates.forEach(function (d) {
+            if (isHoliday(d)) { if (!pi) holi++; return; }
+            if (have[pid + '|' + d]) { skipped++; return; }
+            db.leaves.push({ id: uid(), createdAt: now, employeeId: pid, date: d, type: v.type, reason: v.reason, notes: v.notes });
+            added++;
+          });
         });
-        if (!added) return { err: 'Nothing to add — every date in that range is a holiday or already has a leave entry.' };
-        return { msg: added + ' leave day(s) added' + skipNote(skipped, holi) + '.' };
+        if (!added) return { err: 'Nothing to add — every date is a holiday or already has a leave entry.' };
+        return { msg: added + ' leave day(s) added' + (people ? ' for ' + ids.length + ' employee(s)' : '') + skipNote(skipped, holi) + '.' };
       },
+      bulkNames: ['date', 'type', 'reason', 'notes'],
+      bulkCheck: function (c, recs, sel) { return bulkDateCheck(c, recs, sel, db.leaves, 'employeeId', 'employee', 'Leave'); },
       describe: function (r) { return 'leave of ' + empName(r.employeeId) + ' on ' + r.date; }
     },
     ot: {
       title: 'OT Entry', coll: 'employeeOT', needs: NEED_EMP, holidayNote: 'ot',
       fields: function (rec) {
         return [
-          { name: 'employeeId', label: 'Employee', type: 'select', required: true, placeholder: 'Select employee', options: empOptions(rec && rec.employeeId), wide: true },
+          personField('employeeId', 'Employee', 'employee', empOptions(rec && rec.employeeId), rec),
           { name: 'date', label: 'Date', type: 'date', required: true },
           { name: 'type', label: 'OT Type', type: 'select', required: true, options: withCur(getOpts('otTypes'), rec && rec.type, otLabel), editable: 'ot', addable: 'otTypes', addHint: 'New OT type, e.g. Holiday OT' },
           { name: 'hours', label: 'Hours', type: 'number', required: true, positive: true, max: MAX_HOURS, step: '0.01', hint: 'e.g. 1.5, 2.5, 3.75' },
@@ -814,13 +857,20 @@
       },
       defaults: function () { return { date: todayStr(), type: 'normal' }; },
       validate: function () { return null; },
+      customSave: function (v, people) {
+        if (!people) return null;
+        var now = new Date().toISOString();
+        people.forEach(function (p) { db.employeeOT.push({ id: uid(), createdAt: now, employeeId: p, date: v.date, type: v.type, hours: v.hours, notes: v.notes }); });
+        return { msg: 'OT added for ' + people.length + ' employee(s).' };
+      },
+      bulkNames: ['date', 'type', 'hours', 'notes'],
       describe: function (r) { return otLabel(r.type) + ' of ' + empName(r.employeeId) + ' on ' + r.date; }
     },
     advances: {
       title: 'Advance', coll: 'advances', needs: NEED_EMP,
       fields: function (rec) {
         return [
-          { name: 'employeeId', label: 'Employee', type: 'select', required: true, placeholder: 'Select employee', options: empOptions(rec && rec.employeeId), wide: true },
+          personField('employeeId', 'Employee', 'employee', empOptions(rec && rec.employeeId), rec),
           { name: 'date', label: 'Date', type: 'date', required: true },
           { name: 'amount', label: 'Amount', type: 'number', required: true, positive: true, max: 100000000, step: '0.01' },
           { name: 'reason', label: 'Reason', type: 'text', maxlength: 150, wide: true },
@@ -829,6 +879,13 @@
       },
       defaults: function () { return { date: todayStr() }; },
       validate: function () { return null; },
+      customSave: function (v, people) {
+        if (!people) return null;
+        var now = new Date().toISOString();
+        people.forEach(function (p) { db.advances.push({ id: uid(), createdAt: now, employeeId: p, date: v.date, amount: v.amount, reason: v.reason, notes: v.notes }); });
+        return { msg: 'Advance added for ' + people.length + ' employee(s).' };
+      },
+      bulkNames: ['date', 'amount', 'reason', 'notes'],
       describe: function (r) { return 'advance of ' + empName(r.employeeId) + ' on ' + r.date; }
     },
     outsiders: {
@@ -849,6 +906,7 @@
         if (v.phone && !/^[0-9+()\-\s]{6,25}$/.test(v.phone)) return { msg: 'Enter a valid phone number.', field: 'phone' };
         return null;
       },
+      bulkNames: ['source', 'status'],
       describe: function (r) { return r.name + ' (' + r.workerId + ')'; }
     },
     holidays: {
@@ -889,12 +947,13 @@
         if (!added) return { err: 'Every date in that range is already added as a holiday.' };
         return { msg: added + ' holiday date(s) added' + skipNote(skipped, 0) + '.' };
       },
+      bulkNames: ['name', 'notes'],
       describe: function (r) { return r.name + ' (' + r.date + ')'; }
     },
     outsiderWork: {
       title: 'Work Entry', coll: 'outsideWorkerWork', needs: NEED_WORKER, holidayNote: 'work',
       fields: function (rec) {
-        var f = [{ name: 'workerId', label: 'Worker', type: 'select', required: true, placeholder: 'Select worker', options: workerOptions(rec && rec.workerId), wide: true }];
+        var f = [personField('workerId', 'Worker', 'worker', workerOptions(rec && rec.workerId), rec)];
         if (!rec) f.push({ name: 'mode', label: 'Work Days', type: 'select', required: true, wide: true, options: [['single', 'Single day'], ['range', 'Multiple days (continuous work)']] });
         f.push({ name: 'date', label: 'Date', type: 'date', required: true });
         if (!rec) f.push({ name: 'dateTo', label: 'To Date', type: 'date', hidden: true });
@@ -920,26 +979,32 @@
         return null;
       },
       normalize: function (v) { var o = Object.assign({}, v); delete o.mode; delete o.dateTo; return o; },
-      customSave: function (v) {
-        if (v.mode !== 'range') return null;
+      customSave: function (v, people) {
+        var range = v.mode === 'range';
+        if (!range && !people) return null;
+        var ids = people || [v.workerId], dates = range ? datesBetween(v.date, v.dateTo) : [v.date];
         var have = {}, added = 0, skipped = 0, holi = 0, now = new Date().toISOString();
-        db.outsideWorkerWork.forEach(function (x) { if (x.workerId === v.workerId) have[x.date] = 1; });
-        datesBetween(v.date, v.dateTo).forEach(function (d) {
-          if (isHoliday(d)) { holi++; return; }
-          if (have[d]) { skipped++; return; }
-          db.outsideWorkerWork.push({ id: uid(), createdAt: now, workerId: v.workerId, date: d, type: v.type, details: v.details, notes: v.notes });
-          added++;
+        db.outsideWorkerWork.forEach(function (x) { have[x.workerId + '|' + x.date] = 1; });
+        ids.forEach(function (pid, pi) {
+          dates.forEach(function (d) {
+            if (isHoliday(d)) { if (!pi) holi++; return; }
+            if (have[pid + '|' + d]) { skipped++; return; }
+            db.outsideWorkerWork.push({ id: uid(), createdAt: now, workerId: pid, date: d, type: v.type, details: v.details, notes: v.notes });
+            added++;
+          });
         });
-        if (!added) return { err: 'Nothing to add — every date in that range is a holiday or already has a work entry.' };
-        return { msg: added + ' work day(s) added' + skipNote(skipped, holi) + '.' };
+        if (!added) return { err: 'Nothing to add — every date is a holiday or already has a work entry.' };
+        return { msg: added + ' work day(s) added' + (people ? ' for ' + ids.length + ' worker(s)' : '') + skipNote(skipped, holi) + '.' };
       },
+      bulkNames: ['date', 'type', 'details', 'notes'],
+      bulkCheck: function (c, recs, sel) { return bulkDateCheck(c, recs, sel, db.outsideWorkerWork, 'workerId', 'worker', 'Work days'); },
       describe: function (r) { return 'work of ' + workerName(r.workerId) + ' on ' + r.date; }
     },
     outsiderOT: {
       title: 'Outside Worker OT', coll: 'outsideWorkerOT', needs: NEED_WORKER, holidayNote: 'ot',
       fields: function (rec) {
         return [
-          { name: 'workerId', label: 'Worker', type: 'select', required: true, placeholder: 'Select worker', options: workerOptions(rec && rec.workerId), wide: true },
+          personField('workerId', 'Worker', 'worker', workerOptions(rec && rec.workerId), rec),
           { name: 'date', label: 'Date', type: 'date', required: true },
           { name: 'type', label: 'OT Type', type: 'select', required: true, options: withCur(getOpts('workerOtTypes'), rec && rec.type, otLabel), editable: 'ot', addable: 'workerOtTypes', addHint: 'New OT type, e.g. Holiday OT' },
           { name: 'hours', label: 'Hours', type: 'number', required: true, positive: true, max: MAX_HOURS, step: '0.01', hint: 'e.g. 1.5, 2.5, 3.75' },
@@ -948,11 +1013,37 @@
       },
       defaults: function () { return { date: todayStr(), type: 'normal' }; },
       validate: function () { return null; },
+      customSave: function (v, people) {
+        if (!people) return null;
+        var now = new Date().toISOString();
+        people.forEach(function (p) { db.outsideWorkerOT.push({ id: uid(), createdAt: now, workerId: p, date: v.date, type: v.type, hours: v.hours, notes: v.notes }); });
+        return { msg: 'OT added for ' + people.length + ' worker(s).' };
+      },
+      bulkNames: ['date', 'type', 'hours', 'notes'],
       describe: function (r) { return otLabel(r.type) + ' of ' + workerName(r.workerId) + ' on ' + r.date; }
     }
   };
 
+  function personField(name, label, noun, options, rec) {
+    if (rec) return { name: name, label: label, type: 'select', required: true, placeholder: 'Select ' + noun, options: options, wide: true };
+    return { name: name, label: label, type: 'people', required: true, noun: noun, options: options, wide: true };
+  }
+  function peopleHtml(f, val) {
+    var v = val == null ? '' : val;
+    return '<div class="fld wide" data-fld="' + f.name + '"><span><span class="lbl">' + esc(f.label) + '</span> <b>*</b></span>' +
+      '<select name="who" aria-label="Single or multiple"><option value="single">Single ' + esc(f.noun) + '</option><option value="multi">Multiple ' + esc(f.noun) + 's</option></select>' +
+      '<div data-single><select name="' + f.name + '"><option value="">Select ' + esc(f.noun) + '</option>' + optionsHtml(f.options, v) + '</select></div>' +
+      '<div class="multi hidden" data-multi-box><div class="multi-tools">' +
+      '<input type="search" class="multi-search" placeholder="Search ' + esc(f.noun) + 's…" aria-label="Search list">' +
+      '<button type="button" class="link-btn" data-action="multi-all">Select all</button>' +
+      '<button type="button" class="link-btn" data-action="multi-none">Clear</button>' +
+      '<span class="multi-count" data-multi-count>0 selected</span></div>' +
+      '<div class="multi-list">' + f.options.map(function (o) {
+        return '<label class="multi-item" data-text="' + esc(String(o[1]).toLowerCase()) + '"><input type="checkbox" data-multi value="' + esc(o[0]) + '"><span>' + esc(o[1]) + '</span></label>';
+      }).join('') + '</div></div></div>';
+  }
   function fieldHtml(f, val) {
+    if (f.type === 'people') return peopleHtml(f, val);
     var v = val == null ? '' : val, input;
     if (f.type === 'select') {
       input = '<select name="' + f.name + '">' + (f.placeholder ? '<option value="">' + esc(f.placeholder) + '</option>' : '') +
@@ -1023,6 +1114,171 @@
     if (to) to.classList.toggle('hidden', !on);
     if (lbl) lbl.textContent = on ? 'From Date' : 'Date';
     if (on && form.elements.dateTo && !form.elements.dateTo.value && form.elements.date) form.elements.dateTo.value = form.elements.date.value;
+  }
+  function toggleWho(form, multi) {
+    var s = form.querySelector('[data-single]'), m = form.querySelector('[data-multi-box]');
+    if (s) s.classList.toggle('hidden', multi);
+    if (m) m.classList.toggle('hidden', !multi);
+  }
+  function updateMultiCount(form) {
+    var n = $$('input[data-multi]', form).filter(function (c) { return c.checked; }).length, box = form.querySelector('[data-multi-count]');
+    if (box) box.textContent = n + ' selected';
+  }
+  function multiSet(el, on) {
+    var wrap = el.closest('.fld');
+    $$('.multi-item', wrap).forEach(function (it) {
+      if (!on || !it.classList.contains('hidden')) it.querySelector('input').checked = !!on;
+    });
+    updateMultiCount(el.closest('form'));
+  }
+  function multiSearch(inp) {
+    var q = inp.value.trim().toLowerCase();
+    $$('.multi-item', inp.closest('.fld')).forEach(function (it) { it.classList.toggle('hidden', !!q && it.dataset.text.indexOf(q) === -1); });
+  }
+
+  /* ----- bulk select / edit / delete ----- */
+  function selOf(kind) { return ui.sel[kind] || (ui.sel[kind] = {}); }
+  function refreshBulk(kind) {
+    var n = Object.keys(selOf(kind)).length, bar = $('[data-bulkbar="' + kind + '"]'), all = $('[data-sel-all="' + kind + '"]');
+    if (bar) {
+      bar.classList.toggle('hidden', !n);
+      var c = bar.querySelector('.bulk-count'); if (c) c.textContent = n + ' selected';
+    }
+    if (all) {
+      var boxes = $$('input[data-sel="' + kind + '"]'), k = boxes.filter(function (b) { return b.checked; }).length;
+      all.checked = boxes.length > 0 && k === boxes.length;
+      all.indeterminate = k > 0 && k < boxes.length;
+    }
+  }
+  function onSelToggle(cb) {
+    var kind = cb.dataset.sel, s = selOf(kind);
+    if (cb.checked) s[cb.dataset.id] = true; else delete s[cb.dataset.id];
+    var tr = cb.closest('tr'); if (tr) tr.classList.toggle('selected', !!cb.checked);
+    refreshBulk(kind);
+  }
+  function setAllSel(kind, on) {
+    var s = {};
+    $$('input[data-sel="' + kind + '"]').forEach(function (c) {
+      c.checked = on; if (on) s[c.dataset.id] = true;
+      var tr = c.closest('tr'); if (tr) tr.classList.toggle('selected', on);
+    });
+    ui.sel[kind] = s;
+    refreshBulk(kind);
+  }
+  function selRecords(kind) {
+    var cfg = FORMS[kind];
+    return Object.keys(selOf(kind)).map(function (id) { return db[cfg.coll].find(function (r) { return r.id === id; }); }).filter(Boolean);
+  }
+  function previewList(cfg, recs) {
+    return '<ul class="bulk-list">' + recs.slice(0, 5).map(function (r) { return '<li>' + esc(cfg.describe(r)) + '</li>'; }).join('') +
+      (recs.length > 5 ? '<li>…and ' + (recs.length - 5) + ' more</li>' : '') + '</ul>';
+  }
+  function cascadeCount(kind, set) {
+    if (kind === 'employees') return db.leaves.concat(db.employeeOT, db.advances).filter(function (x) { return set[x.employeeId]; }).length;
+    if (kind === 'outsiders') return db.outsideWorkerOT.concat(db.outsideWorkerWork).filter(function (x) { return set[x.workerId]; }).length;
+    return 0;
+  }
+  function removeRecords(kind, ids) {
+    var cfg = FORMS[kind], set = {};
+    ids.forEach(function (i) { set[i] = 1; });
+    db[cfg.coll] = db[cfg.coll].filter(function (r) { return !set[r.id]; });
+    save(cfg.coll);
+    if (kind === 'employees') {
+      ['leaves', 'employeeOT', 'advances'].forEach(function (k) { db[k] = db[k].filter(function (x) { return !set[x.employeeId]; }); save(k); });
+    } else if (kind === 'outsiders') {
+      ['outsideWorkerOT', 'outsideWorkerWork'].forEach(function (k) { db[k] = db[k].filter(function (x) { return !set[x.workerId]; }); save(k); });
+    }
+  }
+  async function bulkDelete(kind) {
+    var cfg = FORMS[kind], recs = selRecords(kind);
+    if (!recs.length) { toast('Nothing selected.', 'error'); return; }
+    var set = {}; recs.forEach(function (r) { set[r.id] = 1; });
+    var casc = cascadeCount(kind, set);
+    var ok = await confirmBox({
+      title: 'Confirm bulk delete',
+      message: 'Delete <strong>' + recs.length + '</strong> selected record(s)?' + previewList(cfg, recs) +
+        (casc ? 'Their <strong>' + casc + '</strong> related record(s) will also be deleted.<br>' : '') + 'This cannot be undone.',
+      okText: 'Delete ' + recs.length, danger: true
+    });
+    if (!ok) return;
+    removeRecords(kind, recs.map(function (r) { return r.id; }));
+    ui.sel[kind] = {};
+    populateSelects(); renderCurrent();
+    toast(recs.length + ' record(s) deleted.');
+  }
+  function bulkFields(cfg) {
+    var names = cfg.bulkNames || [];
+    return cfg.fields(null).filter(function (f) { return names.indexOf(f.name) !== -1; }).map(function (f) {
+      var g = Object.assign({}, f);
+      g.required = false; delete g.fallback; delete g.hidden; delete g.editable; delete g.addable;
+      if (g.type === 'select') g.placeholder = '— No change —'; else g.hint = 'No change';
+      return g;
+    });
+  }
+  function bulkDateCheck(c, recs, sel, list, key, noun, label) {
+    if (!c.date) return null;
+    var h = holidayInfo(c.date);
+    if (h) return { msg: fmtDate(c.date) + ' is a holiday (' + h.name + '). ' + label + ' cannot be set on a holiday.', field: 'date' };
+    var seen = {}, clash = 0;
+    list.forEach(function (x) { if (!sel[x.id]) seen[x[key] + '|' + x.date] = 1; });
+    recs.forEach(function (r) { var k = r[key] + '|' + c.date; if (seen[k]) clash++; else seen[k] = 1; });
+    if (clash) return { msg: clash + ' of the selected record(s) would clash with another entry for the same ' + noun + ' on ' + fmtDate(c.date) + '.', field: 'date' };
+    return null;
+  }
+  function openBulkEdit(kind) {
+    var cfg = FORMS[kind], recs = selRecords(kind);
+    if (!cfg || !cfg.bulkNames) return;
+    if (!recs.length) { toast('Nothing selected.', 'error'); return; }
+    var fields = bulkFields(cfg), heading = 'Edit ' + recs.length + ' selected';
+    openModal(
+      '<form id="bulk-form" novalidate data-kind="' + kind + '">' +
+      '<div class="modal-head"><h3>' + esc(heading) + '</h3><button type="button" class="icon-x" data-action="close-modal" aria-label="Close">&times;</button></div>' +
+      '<div class="modal-body"><p class="note" style="margin-bottom:14px">Changes apply to all <strong>' + recs.length + '</strong> selected record(s). Leave a field empty to keep each record\'s current value.</p>' +
+      previewList(cfg, recs) +
+      '<div class="form-grid">' + fields.map(function (f) { return fieldHtml(f, ''); }).join('') + '</div></div>' +
+      '<div class="modal-foot"><button type="button" class="btn" data-action="close-modal">Cancel</button><button type="submit" class="btn btn-primary">Apply to ' + recs.length + '</button></div></form>',
+      { label: heading }
+    );
+  }
+  function applyBulkEdit(form) {
+    var kind = form.dataset.kind, cfg = FORMS[kind], recs = selRecords(kind), defs = bulkFields(cfg), changes = {};
+    $$('.invalid', form).forEach(function (el) { el.classList.remove('invalid'); });
+    function fail(name, msg) {
+      var el = form.elements[name];
+      if (el) { el.classList.add('invalid'); el.focus(); }
+      toast(msg, 'error');
+    }
+    if (!recs.length) { toast('Nothing selected.', 'error'); return; }
+    for (var i = 0; i < defs.length; i++) {
+      var f = defs[i], el = form.elements[f.name], v = el ? String(el.value).trim() : '';
+      if (!v) continue;
+      if (f.type === 'date') {
+        if (!isDate(v)) { fail(f.name, 'Enter a valid ' + f.label.toLowerCase() + '.'); return; }
+        changes[f.name] = v;
+      } else if (f.type === 'number') {
+        var n = Number(v.replace(',', '.'));
+        if (!isFinite(n)) { fail(f.name, f.label + ' must be a valid number.'); return; }
+        if (n < 0) { fail(f.name, f.label + ' cannot be negative.'); return; }
+        n = r2(n);
+        if (f.positive && n <= 0) { fail(f.name, f.label + ' must be greater than 0.'); return; }
+        if (f.max && n > f.max) { fail(f.name, f.label + ' cannot be more than ' + fmtNum(f.max) + '.'); return; }
+        changes[f.name] = n;
+      } else {
+        changes[f.name] = v;
+      }
+    }
+    if (!Object.keys(changes).length) { toast('Nothing to change — fill in at least one field.', 'error'); return; }
+    if (cfg.bulkCheck) {
+      var selSet = {}; recs.forEach(function (r) { selSet[r.id] = 1; });
+      var err = cfg.bulkCheck(changes, recs, selSet);
+      if (err) { fail(err.field, err.msg); return; }
+    }
+    var now = new Date().toISOString();
+    recs.forEach(function (r) { Object.assign(r, changes, { updatedAt: now }); });
+    save(cfg.coll);
+    ui.sel[kind] = {};
+    closeModal(); populateSelects(); renderCurrent();
+    toast(recs.length + ' record(s) updated.');
   }
   function saveOption(el) {
     var row = el.closest('.addrow'); if (!row) return;
@@ -1118,8 +1374,14 @@
       if (el) { el.classList.add('invalid'); el.focus(); }
       toast(msg, 'error');
     }
+    var multiIds = null, pf = fields.find(function (x) { return x.type === 'people'; });
+    if (pf && !rec && form.elements.who && form.elements.who.value === 'multi') {
+      multiIds = $$('input[data-multi]', form).filter(function (c) { return c.checked; }).map(function (c) { return c.value; });
+      if (!multiIds.length) { fail('who', 'Select at least one ' + pf.noun + '.'); return; }
+    }
     for (var i = 0; i < fields.length; i++) {
       var f = fields[i], el = form.elements[f.name], v = el ? String(el.value).trim() : '';
+      if (f.type === 'people' && multiIds) { values[f.name] = ''; continue; }
       if (!v && f.fallback) v = f.fallback;
       if (f.required && !v) { fail(f, f.label + ' is required.'); return; }
       if (f.type === 'date' && v && !isDate(v)) { fail(f, 'Enter a valid ' + f.label.toLowerCase() + '.'); return; }
@@ -1138,7 +1400,7 @@
     var err = cfg.validate(values, rec);
     if (err) { fail({ name: err.field }, err.msg); return; }
     if (cfg.customSave && !rec) {
-      var res = cfg.customSave(values);
+      var res = cfg.customSave(values, multiIds);
       if (res) {
         if (res.err) { fail({ name: 'date' }, res.err); return; }
         save(cfg.coll); closeModal(); populateSelects(); renderCurrent(); toast(res.msg);
@@ -1351,6 +1613,7 @@
   function showView(v) {
     if (VIEWS.indexOf(v) === -1) v = 'dashboard';
     ui.view = v;
+    ui.sel = {};
     $$('.view').forEach(function (s) { s.classList.toggle('active', s.id === 'view-' + v); });
     $$('#nav a').forEach(function (a) {
       var on = a.dataset.view === v;
@@ -1390,13 +1653,24 @@
       case 'csv-emp': exportCsv('emp'); break;
       case 'csv-out': exportCsv('out'); break;
       case 'clear-all': clearAll(); break;
+      case 'multi-all': multiSet(el, true); break;
+      case 'multi-none': multiSet(el, false); break;
+      case 'bulk-all': setAllSel(el.dataset.kind, true); break;
+      case 'bulk-clear': setAllSel(el.dataset.kind, false); break;
+      case 'bulk-edit': openBulkEdit(el.dataset.kind); break;
+      case 'bulk-delete': bulkDelete(el.dataset.kind); break;
     }
   });
   document.addEventListener('input', onFilterInput);
+  document.addEventListener('input', function (e) { if (e.target.classList && e.target.classList.contains('multi-search')) multiSearch(e.target); });
   document.addEventListener('change', function (e) {
     onFilterInput(e);
     if (e.target.name === 'mode' && e.target.form && e.target.form.id === 'rec-form') toggleRange(e.target.form, e.target.value === 'range');
     if (e.target.form && e.target.form.id === 'rec-form' && (e.target.name === 'date' || e.target.name === 'mode')) updateHolidayNote(e.target.form);
+    if (e.target.name === 'who' && e.target.form && e.target.form.id === 'rec-form') toggleWho(e.target.form, e.target.value === 'multi');
+    if (e.target.dataset && e.target.dataset.multi !== undefined && e.target.form) updateMultiCount(e.target.form);
+    if (e.target.dataset && e.target.dataset.sel !== undefined) onSelToggle(e.target);
+    if (e.target.dataset && e.target.dataset.selAll !== undefined) setAllSel(e.target.dataset.selAll, !!e.target.checked);
     if (e.target.dataset && e.target.dataset.weekday !== undefined) setWeekday(Number(e.target.dataset.weekday), !!e.target.checked);
     if (e.target.id === 'import-file') { handleImportFile(e.target.files[0]); e.target.value = ''; }
     if (e.target.id === 'currency-input') {
@@ -1408,6 +1682,7 @@
   });
   document.addEventListener('submit', function (e) {
     if (e.target.id === 'rec-form') { e.preventDefault(); submitForm(e.target); }
+    if (e.target.id === 'bulk-form') { e.preventDefault(); applyBulkEdit(e.target); }
   });
   document.addEventListener('keydown', function (e) {
     if (e.key === 'Enter' && e.target.classList && (e.target.classList.contains('edit-a') || e.target.classList.contains('edit-b') || e.target.classList.contains('add-name'))) {
