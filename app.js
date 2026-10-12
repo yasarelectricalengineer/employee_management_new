@@ -12,7 +12,7 @@
   var DEFAULT_SETTINGS = { currency: 'AED', lastBackup: null };
   var MAX_HOURS = 24;
   var LEAVE_BUILTIN = [['Full Day', 'Full Day (1 day)'], ['Half Day', 'Half Day (0.5 day)']];
-  function emptyOptions() { return { leaveTypes: [], otTypes: [], workerOtTypes: [], sources: [] }; }
+  function emptyOptions() { return { leaveTypes: [], otTypes: [], workerOtTypes: [], sources: [], hiddenSrc: [] }; }
   var DEFAULT_LABELS = { normal: 'Normal OT', sunday: 'Sunday OT', src1: 'National', src2: 'Others' };
   function normLabels(l) {
     var r = Object.assign({}, DEFAULT_LABELS);
@@ -50,6 +50,7 @@
       });
     });
     (Array.isArray(o.sources) ? o.sources : []).forEach(function (x) { var n = nm(x); if (n) r.sources.push(n); });
+    (Array.isArray(o.hiddenSrc) ? o.hiddenSrc : []).forEach(function (k) { if ((k === 'src1' || k === 'src2') && r.hiddenSrc.indexOf(k) === -1) r.hiddenSrc.push(k); });
     return r;
   }
   var VIEWS = ['dashboard', 'employees', 'leaves', 'ot', 'advances', 'holidays', 'outsiders', 'outsiderWork', 'outsiderOT', 'reports', 'backup'];
@@ -365,7 +366,9 @@
     if (list === 'otTypes') return ot.concat((o.otTypes || []).map(function (x) { return [x.id, x.name]; }));
     if (list === 'workerOtTypes') return ot.concat((o.workerOtTypes || []).map(function (x) { return [x.id, x.name]; }));
     if (list === 'sources') {
-      var base = [[Lb.src1, Lb.src1], [Lb.src2, Lb.src2]];
+      var hid = o.hiddenSrc || [], base = [];
+      if (hid.indexOf('src1') === -1) base.push([Lb.src1, Lb.src1]);
+      if (hid.indexOf('src2') === -1) base.push([Lb.src2, Lb.src2]);
       return base.concat((o.sources || []).filter(function (n) { return n !== Lb.src1 && n !== Lb.src2; }).map(function (n) { return [n, n]; }));
     }
     return [];
@@ -899,7 +902,7 @@
           { name: 'status', label: 'Status', type: 'select', required: true, options: STATUS_OPTS }
         ];
       },
-      defaults: function () { return { source: db.appSettings.labels.src1, status: 'Active' }; },
+      defaults: function () { var so = getOpts('sources'); return { source: so.length ? so[0][0] : '', status: 'Active' }; },
       validate: function (v, rec) {
         var dup = db.outsideWorkers.find(function (w) { return w.workerId.toLowerCase() === v.workerId.toLowerCase() && (!rec || w.id !== rec.id); });
         if (dup) return { msg: 'Worker ID "' + v.workerId + '" is already used by ' + dup.name + '.', field: 'workerId' };
@@ -1066,14 +1069,48 @@
   function editControls(f) {
     var Lb = db.appSettings.labels, a = f.editable === 'ot' ? ['normal', 'sunday'] : ['src1', 'src2'];
     return '<div class="opt-links"><button type="button" class="link-btn" data-action="toggle-add" data-row="edit">&#9998; Edit names</button>' +
-      '<button type="button" class="link-btn" data-action="toggle-add" data-row="add">+ Add new</button></div>' +
+      '<button type="button" class="link-btn" data-action="toggle-add" data-row="add">+ Add new</button>' +
+      (f.editable === 'src' ? '<button type="button" class="link-btn link-danger" data-action="toggle-add" data-row="del">&#128465; Delete names</button>' : '') + '</div>' +
       '<div class="addrow hidden" data-row="edit" data-edit="' + f.editable + '" data-select="' + f.name + '">' +
       '<input type="text" class="edit-a" maxlength="40" value="' + esc(Lb[a[0]]) + '" aria-label="First option name">' +
       '<input type="text" class="edit-b" maxlength="40" value="' + esc(Lb[a[1]]) + '" aria-label="Second option name">' +
       '<button type="button" class="btn btn-sm btn-accent" data-action="save-option">Save names</button></div>' +
       '<div class="addrow hidden" data-row="add" data-list="' + f.addable + '" data-select="' + f.name + '">' +
       '<input type="text" class="add-name" maxlength="40" placeholder="' + esc(f.addHint || 'New option') + '" autocomplete="off">' +
-      '<button type="button" class="btn btn-sm btn-accent" data-action="add-option">Add</button></div>';
+      '<button type="button" class="btn btn-sm btn-accent" data-action="add-option">Add</button></div>' +
+      (f.editable === 'src' ? '<div class="addrow hidden delrow" data-row="del" data-select="' + f.name + '">' + srcDelHtml() + '</div>' : '');
+  }
+  function refreshDel(form) { var d = form && form.querySelector && form.querySelector('.delrow'); if (d) d.innerHTML = srcDelHtml(); }
+  function srcDelHtml() {
+    var Lb = db.appSettings.labels, o = db.appSettings.options, hid = o.hiddenSrc || [], items = [];
+    if (hid.indexOf('src1') === -1) items.push(['src1', Lb.src1]);
+    if (hid.indexOf('src2') === -1) items.push(['src2', Lb.src2]);
+    (o.sources || []).forEach(function (n) { if (n !== Lb.src1 && n !== Lb.src2) items.push(['x', n]); });
+    if (!items.length) return '<span class="muted">No sources left. Use + Add new.</span>';
+    return items.map(function (it) {
+      return '<span class="chip-del">' + esc(it[1]) + ' <button type="button" class="chip-x" data-action="del-option" data-key="' + it[0] + '" data-name="' + esc(it[1]) + '" aria-label="Delete ' + esc(it[1]) + '" title="Delete">&times;</button></span>';
+    }).join('');
+  }
+  function delSource(el) {
+    var key = el.dataset.key, name = el.dataset.name, form = el.closest('form'), row = el.closest('.addrow');
+    var o = db.appSettings.options, Lb = db.appSettings.labels;
+    var used = db.outsideWorkers.filter(function (w) { return w.source === name; }).length;
+    if (used) { toast('"' + name + '" is used by ' + used + ' worker(s). Change their source first.', 'error'); return; }
+    if (!el.dataset.arm) {
+      el.dataset.arm = '1'; el.innerHTML = 'Delete?'; el.classList.add('armed');
+      setTimeout(function () { if (el.isConnected) { delete el.dataset.arm; el.innerHTML = '&times;'; el.classList.remove('armed'); } }, 3000);
+      return;
+    }
+    if (key === 'src1' || key === 'src2') { o.hiddenSrc = o.hiddenSrc || []; if (o.hiddenSrc.indexOf(key) === -1) o.hiddenSrc.push(key); }
+    else o.sources = o.sources.filter(function (n) { return n !== name; });
+    save('appSettings');
+    var sel = form.elements[row.dataset.select], cur = sel.value;
+    if (cur === name) cur = '';
+    sel.innerHTML = '<option value="">Select source…</option>' + optionsHtml(getOpts('sources'), cur);
+    sel.value = cur;
+    row.innerHTML = srcDelHtml();
+    populateSelects(); renderCurrent();
+    toast('"' + name + '" deleted.');
   }
   function allNames(list) { return getOpts(list).map(function (o) { return o[1]; }); }
   function datesBetween(a, b) {
@@ -1087,7 +1124,7 @@
     if (!row) return;
     $$('.addrow', wrap).forEach(function (r) { if (r !== row) r.classList.add('hidden'); });
     row.classList.toggle('hidden');
-    if (!row.classList.contains('hidden')) row.querySelector('input').focus();
+    var fi = row.querySelector('input'); if (!row.classList.contains('hidden') && fi) fi.focus();
   }
   function addOption(el) {
     var row = el.closest('.addrow'); if (!row) return;
@@ -1099,13 +1136,17 @@
     }
     inp.classList.remove('invalid');
     var o = db.appSettings.options, val;
-    if (list === 'sources') { o.sources.push(name); val = name; }
+    if (list === 'sources') {
+      var dk = ['src1', 'src2'].find(function (k) { return db.appSettings.labels[k].toLowerCase() === name.toLowerCase(); });
+      if (dk) { o.hiddenSrc = (o.hiddenSrc || []).filter(function (k) { return k !== dk; }); val = db.appSettings.labels[dk]; }
+      else { o.sources.push(name); val = name; }
+    }
     else { val = 'x' + uid(); o[list].push({ id: val, name: name }); }
     save('appSettings');
     var sel = form.elements[row.dataset.select];
     sel.innerHTML = optionsHtml(withCur(getOpts(list), val, otLabel), val);
     sel.value = val;
-    inp.value = ''; row.classList.add('hidden');
+    inp.value = ''; row.classList.add('hidden'); refreshDel(form);
     populateSelects();
     toast('"' + name + '" added and selected.');
   }
@@ -1308,7 +1349,7 @@
     var list = kind === 'ot' ? (form.dataset.kind === 'outsiderOT' ? 'workerOtTypes' : 'otTypes') : 'sources';
     sel.innerHTML = optionsHtml(withCur(getOpts(list), cur, kind === 'ot' ? otLabel : null), cur);
     sel.value = cur;
-    row.classList.add('hidden');
+    row.classList.add('hidden'); refreshDel(form);
     populateSelects(); renderCurrent();
     toast('Option names updated.');
   }
@@ -1645,6 +1686,7 @@
       case 'toggle-add': toggleAdd(el); break;
       case 'save-option': saveOption(el); break;
       case 'add-option': addOption(el); break;
+      case 'del-option': delSource(el); break;
       case 'export-json': toast('Backup downloaded: ' + exportJSON()); break;
       case 'import-json': $('#import-file').click(); break;
       case 'export-drive': exportToDrive(); break;
